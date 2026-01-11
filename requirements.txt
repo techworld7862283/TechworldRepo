@@ -1,0 +1,14 @@
+fastapi==0.104.0
+uvicorn==0.24.0
+python-multipart
+passlib[bcrypt]
+bcrypt==3.2.2
+python-jose
+pandas
+scikit-learn
+joblib
+PyPDF2
+python-docx
+streamlit
+plotly
+requests
