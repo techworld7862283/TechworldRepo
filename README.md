@@ -1,6 +1,3 @@
-Below is a **clean, professional, industry-grade README.md** suitable for **GitHub, portfolio, recruiters, and SaaS positioning**.
-You can copy-paste this directly as `README.md`.
-
 ---
 
 # 📄 Resume Parser AI — SaaS-Ready Resume Intelligence Platform
@@ -249,4 +246,5 @@ MIT License — Free to use, modify, and distribute.
 ## 🤝 Author
 
 **Muhammad Azhar**
+
 AI Engineer | AI & Full-Stack Developer
