@@ -1,245 +1,142 @@
 import streamlit as st
-import requests
 import pandas as pd
-import json
+import joblib
+import tempfile
+import os
 from collections import Counter
 import plotly.express as px
-import os
 
-# =========================
-# CONFIG
-# =========================
+from utils.parser import parse_resume_text
+from utils.file_parser import extract_text_from_pdf, extract_text_from_docx
+
 st.set_page_config(page_title="Resume Parser AI", layout="wide")
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
 
-# =========================
-# SESSION STATE INIT
-# =========================
-if "token" not in st.session_state:
-    st.session_state["token"] = None
+# ======================
+# LOAD MODEL
+# ======================
+classifier = joblib.load("ml/resume_classifier.pkl")
 
-if "resumes" not in st.session_state:
-    st.session_state["resumes"] = []
+# ======================
+# SIMPLE AUTH (MVP)
+# ======================
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
 
-# =========================
-# AUTHENTICATION
-# =========================
-st.sidebar.title("🔐 Authentication")
+st.sidebar.title("🔐 Login")
 
-if st.session_state["token"] is None:
-    email = st.sidebar.text_input("Email")
-    password = st.sidebar.text_input("Password", type="password")
+if not st.session_state.logged_in:
+    user = st.sidebar.text_input("Username")
+    pwd = st.sidebar.text_input("Password", type="password")
 
     if st.sidebar.button("Login"):
-        res = requests.post(
-            f"{API_URL}/token",
-            data={"username": email, "password": password}
-        )
-        if res.status_code == 200:
-            st.session_state["token"] = res.json()["access_token"]
-            st.sidebar.success("Logged in successfully")
+        if user == "admin" and pwd == "admin123":
+            st.session_state.logged_in = True
             st.experimental_rerun()
         else:
             st.sidebar.error("Invalid credentials")
-else:
-    st.sidebar.success("Logged in")
-    if st.sidebar.button("Logout"):
-        st.session_state["token"] = None
-        st.experimental_rerun()
-
-# Stop app if not logged in
-if not st.session_state["token"]:
-    st.warning("Please log in to continue")
     st.stop()
 
-headers = {
-    "Authorization": f"Bearer {st.session_state['token']}"
-}
+if st.sidebar.button("Logout"):
+    st.session_state.logged_in = False
+    st.experimental_rerun()
 
-# =========================
-# UPLOAD SINGLE RESUME
-# =========================
+# ======================
+# UPLOAD RESUME
+# ======================
 st.sidebar.header("📤 Upload Resume")
 
-uploaded_file = st.sidebar.file_uploader(
-    "Upload PDF or DOCX",
-    type=["pdf", "docx"]
-)
+uploaded = st.sidebar.file_uploader("PDF / DOCX", ["pdf", "docx"])
 
-if uploaded_file:
-    with st.spinner("Parsing resume..."):
-        res = requests.post(
-            f"{API_URL}/upload_resume",
-            files={
-                "file": (
-                    uploaded_file.name,
-                    uploaded_file.getvalue(),
-                    uploaded_file.type
-                )
-            },
-            headers=headers
-        )
+if uploaded:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded.name) as tmp:
+        tmp.write(uploaded.read())
+        path = tmp.name
 
-        if res.status_code == 200:
-            result = res.json()
-            st.sidebar.success("Parsed Successfully")
-            st.sidebar.markdown(
-                f"**Category:** `{result['category']}`  \n"
-                f"**Confidence:** `{result['confidence']}%`"
-            )
-            st.sidebar.json(result)
-        elif res.status_code == 401:
-            st.sidebar.error("Session expired. Please login again.")
-            st.session_state["token"] = None
-            st.experimental_rerun()
-        else:
-            st.sidebar.error("Failed to parse resume")
+    if uploaded.name.endswith(".pdf"):
+        text = extract_text_from_pdf(path)
+    else:
+        text = extract_text_from_docx(path)
 
-# =========================
-# LOAD BULK RESUMES
-# =========================
+    parsed = parse_resume_text(text)
+
+    probs = classifier.predict_proba([text])[0]
+    idx = probs.argmax()
+
+    parsed["category"] = classifier.classes_[idx]
+    parsed["confidence"] = round(probs[idx] * 100, 2)
+
+    st.sidebar.success("Parsed Successfully")
+    st.sidebar.json(parsed)
+
+    os.remove(path)
+
+# ======================
+# LOAD DATASET
+# ======================
 st.title("📄 Resume Parser AI Dashboard")
 
-limit = st.slider("Number of resumes", 1, 50, 10)
+df = pd.read_csv("data/UpdatedResumeDataSet.csv").head(50)
 
-if st.button("🔍 Parse Dataset"):
-    with st.spinner("Loading resumes..."):
-        res = requests.get(
-            f"{API_URL}/parse",
-            params={"limit": limit},
-            headers=headers
-        )
+resumes = []
+for i, row in df.iterrows():
+    parsed = parse_resume_text(row["Resume"])
+    probs = classifier.predict_proba([row["Resume"]])[0]
+    idx = probs.argmax()
+    parsed["category"] = classifier.classes_[idx]
+    parsed["confidence"] = round(probs[idx] * 100, 2)
+    resumes.append(parsed)
 
-        if res.status_code == 401:
-            st.error("Session expired. Please login again.")
-            st.session_state["token"] = None
-            st.experimental_rerun()
-
-        try:
-            data = res.json()
-        except Exception:
-            st.error("Failed to parse API response")
-            st.stop()
-
-        if res.status_code == 200 and isinstance(data, list):
-            st.session_state["resumes"] = data
-        else:
-            st.error("API returned invalid data")
-
-if not st.session_state["resumes"]:
-    st.info("Load resumes to continue")
-    st.stop()
-
-resumes = st.session_state["resumes"]
-filtered = resumes.copy()
-
-# =========================
-# GLOBAL DATA
-# =========================
-all_skills = []
-categories = []
-
-for r in resumes:
-    all_skills.extend(r.get("skills", []))
-    if r.get("category"):
-        categories.append(r["category"])
-
-# =========================
+# ======================
 # FILTERS
-# =========================
-st.sidebar.header("🔎 Filters")
+# ======================
+skills = sorted({s for r in resumes for s in r["skills"]})
+categories = sorted({r["category"] for r in resumes})
 
-selected_skills = st.sidebar.multiselect(
-    "Skills", sorted(set(all_skills))
-)
-selected_category = st.sidebar.selectbox(
-    "Category", ["All"] + sorted(set(categories))
-)
-missing_email = st.sidebar.checkbox("Missing Email")
-missing_phone = st.sidebar.checkbox("Missing Phone")
-search_name = st.sidebar.text_input("Search Name")
+selected_skill = st.sidebar.selectbox("Skill", ["All"] + skills)
+selected_cat = st.sidebar.selectbox("Category", ["All"] + categories)
 
-if selected_skills:
-    filtered = [
-        r for r in filtered
-        if all(s in r.get("skills", []) for s in selected_skills)
-    ]
+filtered = resumes
 
-if selected_category != "All":
-    filtered = [
-        r for r in filtered
-        if r.get("category") == selected_category
-    ]
+if selected_skill != "All":
+    filtered = [r for r in filtered if selected_skill in r["skills"]]
 
-if missing_email:
-    filtered = [r for r in filtered if not r.get("email")]
-
-if missing_phone:
-    filtered = [r for r in filtered if not r.get("phone")]
-
-if search_name:
-    filtered = [
-        r for r in filtered
-        if r.get("name") and search_name.lower() in r["name"].lower()
-    ]
+if selected_cat != "All":
+    filtered = [r for r in filtered if r["category"] == selected_cat]
 
 if not filtered:
-    st.warning("No resumes match the selected filters")
+    st.warning("No resumes match filters")
     st.stop()
 
-# =========================
+# ======================
 # TABS
-# =========================
-tab1, tab2, tab3 = st.tabs(
-    ["📄 Resumes", "📊 Analytics", "🏆 Top Candidates"]
-)
+# ======================
+tab1, tab2, tab3 = st.tabs(["📄 Resumes", "📊 Analytics", "🏆 Top Candidates"])
 
-# ---- TAB 1: RESUMES ----
 with tab1:
-    st.subheader(f"Showing {len(filtered)} resumes")
-
     for r in filtered[:20]:
-        with st.expander(
-            f"{r.get('name','Unknown')} — {r.get('category','')}"
-        ):
-            st.write("📧", r.get("email", "N/A"))
-            st.write("📞", r.get("phone", "N/A"))
-            st.write("🧠 Skills:", ", ".join(r.get("skills", [])))
+        with st.expander(f"{r['name']} — {r['category']}"):
+            st.write("📧", r["email"])
+            st.write("📞", r["phone"])
+            st.write("🧠 Skills:", ", ".join(r["skills"]))
+            st.write("🎯 Confidence:", r["confidence"], "%")
 
-# ---- TAB 2: ANALYTICS ----
 with tab2:
-    skill_df = pd.DataFrame(
-        Counter(all_skills).items(),
-        columns=["Skill", "Count"]
-    )
-    st.plotly_chart(
-        px.bar(skill_df, x="Skill", y="Count"),
-        use_container_width=True
-    )
+    skill_counts = Counter(s for r in resumes for s in r["skills"])
+    st.plotly_chart(px.bar(
+        pd.DataFrame(skill_counts.items(), columns=["Skill", "Count"]),
+        x="Skill", y="Count"
+    ), use_container_width=True)
 
-    cat_df = pd.DataFrame(
-        Counter(categories).items(),
-        columns=["Category", "Count"]
-    )
-    st.plotly_chart(
-        px.bar(cat_df, x="Category", y="Count"),
-        use_container_width=True
-    )
-
-# ---- TAB 3: TOP CANDIDATES ----
 with tab3:
     top_n = st.slider("Top N", 1, 10, 5)
-
-    for cat in sorted(set(categories)):
+    for cat in categories:
         top = sorted(
-            [r for r in filtered if r.get("category") == cat],
-            key=lambda x: x.get("confidence", 0),
+            [r for r in resumes if r["category"] == cat],
+            key=lambda x: x["confidence"],
             reverse=True
         )[:top_n]
 
         with st.expander(cat):
             for r in top:
-                st.markdown(
-                    f"**{r.get('name','Unknown')}** — "
-                    f"{r.get('confidence',0)}%"
-                )
+                st.write(f"**{r['name']}** — {r['confidence']}%")
+
